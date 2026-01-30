@@ -1,0 +1,39 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+.python-version
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Data files (logs, seen products, locks)
+data/logs/
+data/seen/
+*.log
+*_seen_products.json
+*.lock
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Legacy files (to be removed)
+jonas_cron.log
+jonas_seen_products.json
+jonas_notification_sent.lock
