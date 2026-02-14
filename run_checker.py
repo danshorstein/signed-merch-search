@@ -21,12 +21,16 @@ CHECKERS = {
     'jonas': ('sites.jonas_brothers', 'JonasBrothersChecker'),
     'noah': ('sites.banquet_records', 'NoahKahanChecker'),
     'noah-store': ('sites.noah_kahan_store', 'NoahKahanStoreChecker'),
+    'benson': ('sites.benson_boone', 'BensonBooneChecker'),
+    'gracie': ('sites.gracie_abrams', 'GracieAbramsChecker'),
+    'rolemodel': ('sites.role_model', 'RoleModelChecker'),
     # Add more sites here as you create them:
     # 'taylor': ('sites.taylor_swift', 'TaylorSwiftChecker'),
 }
 
 # Sites to run by default (when no specific site is specified)
-DEFAULT_SITES = ['jonas', 'noah', 'noah-store']
+DEFAULT_SITES = ['jonas', 'noah', 'noah-store', 'benson', 'gracie', 'rolemodel']
+
 
 
 def get_checker_class(site_key: str):

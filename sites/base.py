@@ -6,6 +6,7 @@ import os
 import sys
 import json
 import time
+from datetime import datetime, timedelta
 import smtplib
 from abc import ABC, abstractmethod
 from email.mime.text import MIMEText
@@ -25,6 +26,10 @@ PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 LOGS_DIR = DATA_DIR / "logs"
 SEEN_DIR = DATA_DIR / "seen"
+
+
+# How many days of logs to keep
+LOG_RETENTION_DAYS = 30
 
 
 class ProductChecker(ABC):
@@ -54,6 +59,7 @@ class ProductChecker(ABC):
         """
         self.quiet = quiet
         self._ensure_directories()
+        self._rotate_logs()
         
         # Email config from environment
         self.email_sender = os.getenv('EMAIL_SENDER')
@@ -64,6 +70,34 @@ class ProductChecker(ABC):
         """Ensure data directories exist."""
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         SEEN_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _rotate_logs(self):
+        """Remove log entries older than LOG_RETENTION_DAYS."""
+        if not self.log_file.exists():
+            return
+
+        cutoff = datetime.now() - timedelta(days=LOG_RETENTION_DAYS)
+        kept_lines = []
+
+        try:
+            with open(self.log_file, 'r') as f:
+                for line in f:
+                    # Parse timestamp from log format: [YYYY-MM-DD HH:MM:SS]
+                    if line.startswith('[') and ']' in line:
+                        try:
+                            ts_str = line[1:line.index(']')]
+                            ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+                            if ts >= cutoff:
+                                kept_lines.append(line)
+                        except ValueError:
+                            kept_lines.append(line)  # keep unparseable lines
+                    else:
+                        kept_lines.append(line)
+
+            with open(self.log_file, 'w') as f:
+                f.writelines(kept_lines)
+        except Exception:
+            pass  # don't let log rotation break the checker
     
     # --- Abstract properties that subclasses must implement ---
     

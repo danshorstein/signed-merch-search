@@ -29,6 +29,9 @@ data/seen/
 *_seen_products.json
 *.lock
 
+# Archived scripts
+archive/
+
 # OS files
 .DS_Store
 Thumbs.db
