@@ -12,6 +12,7 @@ Monitors online stores for signed merchandise availability and sends email notif
 | Benson Boone Store | `benson` | Signed items at store.bensonboone.com |
 | Gracie Abrams Store | `gracie` | Signed items at shop.gracieabrams.com |
 | Role Model Store | `rolemodel` | Signed items at shop.heyrolemodel.com |
+| Taylor Swift Official Store | `taylor` | All new items + signed restock alerts at store.taylorswift.com |
 
 
 ## Setup
@@ -84,7 +85,8 @@ product_searches/
 │   ├── noah_kahan_store.py # Noah Kahan official store
 │   ├── benson_boone.py     # Benson Boone store
 │   ├── gracie_abrams.py    # Gracie Abrams store
-│   └── role_model.py       # Role Model store
+│   ├── role_model.py       # Role Model store
+│   └── taylor_swift.py     # Taylor Swift store (uses JSON API)
 ├── archive/                # Retired standalone scripts (not in git)
 └── data/                   # Runtime data (not in git)
     ├── logs/               # Per-site log files (auto-rotated at 30 days)
