@@ -3,8 +3,8 @@ Taylor Swift Store product checker.
 Monitors ALL new products at store.taylorswift.com and gives
 special alerts for signed items (with 2-hour recheck window).
 
-Uses Shopify's JSON API for speed — fetches all ~273 products
-in ~1 second via 2 API calls instead of scraping 12 HTML pages.
+Uses Shopify's JSON API. Tries requests first, falls back to
+Playwright if blocked by bot protection.
 """
 import json
 import time
@@ -16,7 +16,6 @@ from .base import ProductChecker, SEEN_DIR
 
 
 # How long (seconds) before a signed item alert can fire again.
-# This lets us re-alert on restocks without pinging every minute.
 SIGNED_COOLDOWN_SECONDS = 2 * 60 * 60  # 2 hours
 
 
@@ -29,6 +28,8 @@ class TaylorSwiftChecker(ProductChecker):
       2. SIGNED ITEM alert — signed items that are in stock,
          re-checks every 2 hours so restocks get caught
     """
+
+    use_playwright = True  # enable fallback
 
     @property
     def site_name(self) -> str:
@@ -46,11 +47,9 @@ class TaylorSwiftChecker(ProductChecker):
 
     @property
     def _signed_seen_file(self) -> Path:
-        """Separate file for signed items with timestamps."""
         return SEEN_DIR / f"{self._safe_name}_signed_seen.json"
 
     def _load_signed_seen(self) -> dict:
-        """Load signed items seen dict: {url: last_alerted_timestamp}."""
         if self._signed_seen_file.exists():
             try:
                 with open(self._signed_seen_file, 'r') as f:
@@ -60,158 +59,207 @@ class TaylorSwiftChecker(ProductChecker):
         return {}
 
     def _save_signed_seen(self, data: dict):
-        """Save signed items seen dict."""
         with open(self._signed_seen_file, 'w') as f:
             json.dump(data, f, indent=2)
 
     # --- Product fetching via JSON API ---
 
-    def fetch_products(self) -> list:
-        """
-        Fetch ALL products from the Shopify JSON API.
-        Returns list of product dicts with title, price, url, image_url,
-        plus extra fields: is_signed, is_available.
-        """
-        all_products = []
-        page = 1
+    def _fetch_json_via_requests(self) -> list | None:
+        """Try fetching JSON API directly via requests."""
+        all_products_raw = []
+        page_num = 1
 
         while True:
-            url = f"{self.search_url}&page={page}&t={int(time.time())}"
+            url = f"{self.search_url}&page={page_num}&t={int(time.time())}"
             try:
                 r = requests.get(url, headers=self.HEADERS, timeout=15)
-                if r.status_code != 200:
-                    self.log(f"ERROR: Status code {r.status_code} on page {page}")
-                    break
+                if self._is_blocked(r) or r.status_code != 200:
+                    # If we already got some products, return them
+                    # Otherwise signal to try Playwright
+                    return all_products_raw if all_products_raw else None
 
                 data = r.json()
                 products = data.get('products', [])
-
                 if not products:
-                    break  # No more pages
+                    break
 
-                for p in products:
-                    title = p.get('title', 'Unknown')
-                    handle = p.get('handle', '')
-                    variants = p.get('variants', [])
+                all_products_raw.extend(products)
+                self.log(f"Page {page_num}: fetched {len(products)} products via requests")
+                page_num += 1
 
-                    # Check availability across ALL variants
-                    is_available = any(v.get('available', False) for v in variants)
+            except Exception:
+                return all_products_raw if all_products_raw else None
 
-                    # Get price from first variant
-                    price = 'Price N/A'
-                    if variants:
-                        raw_price = variants[0].get('price', '')
-                        if raw_price:
-                            price = f"${float(raw_price):.2f}"
+        return all_products_raw
 
-                    # Get image
-                    image_url = ''
-                    images = p.get('images', [])
-                    if images:
-                        image_url = images[0].get('src', '')
+    def _fetch_json_via_playwright(self) -> list | None:
+        """Fetch JSON API using Playwright as fallback."""
+        self.log("Falling back to Playwright for JSON API")
+        all_products_raw = []
+        page_num = 1
 
-                    # Check if signed
-                    search_text = f"{title} {handle}".lower()
-                    is_signed = 'signed' in search_text or 'autograph' in search_text
+        try:
+            self._start_browser()
+        except Exception:
+            return None
 
-                    product_url = f"{self.base_url}/products/{handle}"
+        # Load homepage first to pass bot protection
+        homepage_html = self.get_page_html(self.base_url, wait_ms=2000)
+        if not homepage_html:
+            self.log("ERROR: Could not load store homepage via Playwright")
+            return None
 
-                    all_products.append({
-                        'title': title,
-                        'price': price,
-                        'url': product_url,
-                        'image_url': image_url,
-                        'is_signed': is_signed,
-                        'is_available': is_available,
-                    })
+        while True:
+            time.sleep(1)
+            url = f"{self.search_url}&page={page_num}&t={int(time.time())}"
 
-                self.log(f"Page {page}: fetched {len(products)} products")
-                page += 1
+            try:
+                json_text = self._page.evaluate(f"""
+                    async () => {{
+                        const response = await fetch("{url}");
+                        if (!response.ok) return null;
+                        return await response.text();
+                    }}
+                """)
+
+                if not json_text:
+                    self.log(f"ERROR: Could not fetch JSON on page {page_num}")
+                    break
+
+                data = json.loads(json_text)
+                products = data.get('products', [])
+                if not products:
+                    break
+
+                all_products_raw.extend(products)
+                self.log(f"Page {page_num}: fetched {len(products)} products via Playwright")
+                page_num += 1
 
             except Exception as e:
-                self.log(f"ERROR fetching page {page}: {e}")
+                self.log(f"ERROR fetching page {page_num}: {e}")
                 break
 
-        self.log(f"Total: {len(all_products)} products fetched")
+        return all_products_raw
+
+    def _parse_raw_products(self, raw_products: list) -> list:
+        """Convert raw Shopify JSON products to our standard format."""
+        all_products = []
+
+        for p in raw_products:
+            title = p.get('title', 'Unknown')
+            handle = p.get('handle', '')
+            variants = p.get('variants', [])
+
+            is_available = any(v.get('available', False) for v in variants)
+
+            price = 'Price N/A'
+            if variants:
+                raw_price = variants[0].get('price', '')
+                if raw_price:
+                    price = f"${float(raw_price):.2f}"
+
+            image_url = ''
+            images = p.get('images', [])
+            if images:
+                image_url = images[0].get('src', '')
+
+            search_text = f"{title} {handle}".lower()
+            is_signed = 'signed' in search_text or 'autograph' in search_text
+
+            product_url = f"{self.base_url}/products/{handle}"
+
+            all_products.append({
+                'title': title,
+                'price': price,
+                'url': product_url,
+                'image_url': image_url,
+                'is_signed': is_signed,
+                'is_available': is_available,
+            })
+
         return all_products
 
+    def fetch_products(self) -> list:
+        """Fetch all products. Requests first, Playwright fallback."""
+        raw = self._fetch_json_via_requests()
+        if raw is None and self.use_playwright:
+            raw = self._fetch_json_via_playwright()
+        if raw is None:
+            return []
+
+        products = self._parse_raw_products(raw)
+        self.log(f"Total: {len(products)} products fetched")
+        return products
+
     def parse_products(self, soup) -> list:
-        """Not used — fetch_products uses JSON API."""
         return []
 
-    # --- Custom run logic for dual notifications ---
+    # --- Custom run logic ---
 
     def run(self):
-        """
-        Custom run with two notification types:
-        1. New items (any product not seen before)
-        2. Signed items in stock (re-alerts every 2 hours)
-        """
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         now = time.time()
 
-        # Load tracking data
-        seen_products = self.load_seen_products()
-        signed_seen = self._load_signed_seen()
+        try:
+            seen_products = self.load_seen_products()
+            signed_seen = self._load_signed_seen()
 
-        # Fetch all products
-        products = self.fetch_products()
-        if not products:
-            self.log("No products found or fetch failed")
-            return
+            products = self.fetch_products()
+            if not products:
+                self.log("No products found or fetch failed")
+                self._record_failure(f"No products returned from {self.search_url}")
+                return
 
-        # Categorize
-        new_products = []
-        signed_in_stock = []
-        all_current_urls = set()
+            self._record_success()
 
-        for product in products:
-            clean_url = product['url'].split('?')[0]
-            all_current_urls.add(clean_url)
+            new_products = []
+            signed_in_stock = []
+            all_current_urls = set()
 
-            # Track new items (any product not seen before)
-            if clean_url not in seen_products:
-                new_products.append(product)
+            for product in products:
+                clean_url = product['url'].split('?')[0]
+                all_current_urls.add(clean_url)
 
-            # Track signed items that are in stock and past cooldown
-            if product.get('is_signed') and product.get('is_available'):
-                last_alerted = signed_seen.get(clean_url, 0)
-                if (now - last_alerted) >= SIGNED_COOLDOWN_SECONDS:
-                    signed_in_stock.append(product)
+                if clean_url not in seen_products:
+                    new_products.append(product)
 
-        # --- Send SIGNED item alert (priority) ---
-        if signed_in_stock:
-            subject = f"🚨 SIGNED Taylor Swift Items IN STOCK! - {len(signed_in_stock)} item(s) - {timestamp}"
-            body = self._build_signed_email(signed_in_stock)
-            if self.send_email(subject, body):
-                for p in signed_in_stock:
-                    signed_seen[p['url'].split('?')[0]] = now
-                self._save_signed_seen(signed_seen)
-                self.log(f"SIGNED ALERT sent for {len(signed_in_stock)} item(s)")
+                if product.get('is_signed') and product.get('is_available'):
+                    last_alerted = signed_seen.get(clean_url, 0)
+                    if (now - last_alerted) >= SIGNED_COOLDOWN_SECONDS:
+                        signed_in_stock.append(product)
 
-        # --- Send NEW item alert ---
-        if new_products:
-            # Filter out signed items from new-item email if they were
-            # already covered by the signed alert above
-            signed_urls = {p['url'].split('?')[0] for p in signed_in_stock}
-            new_non_signed = [p for p in new_products if p['url'].split('?')[0] not in signed_urls]
-
-            if new_non_signed:
-                subject = self.get_email_subject(new_non_signed, timestamp)
-                body = self.build_email_body(new_non_signed)
+            # Signed item alert (priority)
+            if signed_in_stock:
+                subject = f"🚨 SIGNED Taylor Swift Items IN STOCK! - {len(signed_in_stock)} item(s) - {timestamp}"
+                body = self._build_signed_email(signed_in_stock)
                 if self.send_email(subject, body):
-                    self.log(f"NEW ITEMS alert sent for {len(new_non_signed)} item(s)")
+                    for p in signed_in_stock:
+                        signed_seen[p['url'].split('?')[0]] = now
+                    self._save_signed_seen(signed_seen)
+                    self.log(f"SIGNED ALERT sent for {len(signed_in_stock)} item(s)")
 
-            # Update seen products after successful processing
-            seen_products.update(all_current_urls)
-            self.save_seen_products(seen_products)
-            self.log(f"Updated seen products ({len(all_current_urls)} total)")
-        else:
-            self.log(f"OK - {len(products)} items, no new products")
-            self.save_seen_products(seen_products)
+            # New item alert
+            if new_products:
+                signed_urls = {p['url'].split('?')[0] for p in signed_in_stock}
+                new_non_signed = [p for p in new_products if p['url'].split('?')[0] not in signed_urls]
+
+                if new_non_signed:
+                    subject = self.get_email_subject(new_non_signed, timestamp)
+                    body = self.build_email_body(new_non_signed)
+                    if self.send_email(subject, body):
+                        self.log(f"NEW ITEMS alert sent for {len(new_non_signed)} item(s)")
+
+                seen_products.update(all_current_urls)
+                self.save_seen_products(seen_products)
+                self.log(f"Updated seen products ({len(all_current_urls)} total)")
+            else:
+                self.log(f"OK - {len(products)} items, no new products")
+                self.save_seen_products(seen_products)
+
+        finally:
+            self._stop_browser()
 
     def _build_signed_email(self, signed_products: list) -> str:
-        """Build a special email body for signed items."""
         lines = [
             "🚨 SIGNED TAYLOR SWIFT ITEMS ARE IN STOCK! 🚨",
             "",
@@ -243,7 +291,6 @@ class TaylorSwiftChecker(ProductChecker):
 
 
 def run_checker(quiet: bool = False):
-    """Run the Taylor Swift checker."""
     checker = TaylorSwiftChecker(quiet=quiet)
     checker.run()
 

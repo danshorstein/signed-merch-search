@@ -11,7 +11,9 @@ class JonasBrothersChecker(ProductChecker):
     
     Target: https://shop.jonasbrothers.com/search?type=product&q=signed*&filter.v.availability=1
     """
-    
+
+    use_playwright = True
+
     @property
     def site_name(self) -> str:
         return "Jonas Brothers"

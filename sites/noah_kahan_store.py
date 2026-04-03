@@ -19,7 +19,9 @@ class NoahKahanStoreChecker(ProductChecker):
     - div.card__title p for title
     - span.price__current for price
     """
-    
+
+    use_playwright = True
+
     @property
     def site_name(self) -> str:
         return "Noah Kahan Store"

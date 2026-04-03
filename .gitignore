@@ -40,3 +40,5 @@ Thumbs.db
 jonas_cron.log
 jonas_seen_products.json
 jonas_notification_sent.lock
+
+BUSINESS_PLAN.md

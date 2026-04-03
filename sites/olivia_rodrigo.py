@@ -1,6 +1,6 @@
 """
-Gracie Abrams Store product checker.
-Monitors signed items at shop.gracieabrams.com
+Olivia Rodrigo Store product checker.
+Monitors signed items at store.oliviarodrigo.com
 
 Regex-based detection finds product URLs, then checks each product page
 for sold-out status. Uses requests first, Playwright fallback.
@@ -11,26 +11,31 @@ import time
 from .base import ProductChecker
 
 
-class GracieAbramsChecker(ProductChecker):
+class OliviaRodrigoChecker(ProductChecker):
     """
-    Checker for signed Gracie Abrams merchandise.
+    Checker for signed Olivia Rodrigo merchandise.
 
-    Target: https://shop.gracieabrams.com/search?q=signed
+    Target: https://store.oliviarodrigo.com/search?q=signed
+
+    Stock detection:
+        - SOLD OUT pages contain "Sorry Sold out" text, 'sold-out' CSS classes,
+          and/or aria-disabled buttons.
+        - IN STOCK pages have a functional "Add to cart" button.
     """
 
     use_playwright = True
 
     @property
     def site_name(self) -> str:
-        return "Gracie Abrams"
+        return "Olivia Rodrigo"
 
     @property
     def search_url(self) -> str:
-        return "https://shop.gracieabrams.com/search?q=signed"
+        return "https://store.oliviarodrigo.com/search?q=signed"
 
     @property
     def base_url(self) -> str:
-        return "https://shop.gracieabrams.com"
+        return "https://store.oliviarodrigo.com"
 
     def fetch_products(self) -> list:
         search_term = 'signed'
@@ -50,7 +55,7 @@ class GracieAbramsChecker(ProductChecker):
             for m in matches
         ]
 
-        self.log(f"Found {len(items)} product URLs to check")
+        self.log(f"Found {len(items)} signed product URLs to check")
         products = []
 
         for item_url in items:
@@ -71,16 +76,22 @@ class GracieAbramsChecker(ProductChecker):
             title = "Signed Item"
             title_match = re.search(r'<title>(.*?)</title>', html)
             if title_match:
-                title = title_match.group(1).split('–')[0].split('|')[0].strip()
+                raw = title_match.group(1)
+                title = raw.split('–')[0].split('|')[0].split(' - Olivia')[0].strip()
 
             if not is_sold_out and sold_out_count < 6:
+                price = 'See listing'
+                price_match = re.search(r'"price"\s*:\s*["\']?\$?([\d,.]+)', html)
+                if price_match:
+                    price = f"${price_match.group(1)}"
+
                 products.append({
                     'title': title,
-                    'price': 'See listing',
+                    'price': price,
                     'url': item_url.split('?')[0],
                     'image_url': '',
                 })
-                self.log(f"Found in-stock: {title}")
+                self.log(f"Found IN STOCK: {title}")
             else:
                 self.log(f"Sold out: {title}")
 
@@ -90,14 +101,14 @@ class GracieAbramsChecker(ProductChecker):
         return []
 
     def get_email_subject(self, new_products: list, timestamp: str) -> str:
-        return f"✨ Gracie Abrams SIGNED Items Alert! - {len(new_products)} item(s) - {timestamp}"
+        return f"🦋 Olivia Rodrigo SIGNED Items Alert! - {len(new_products)} item(s) - {timestamp}"
 
     def get_email_intro(self) -> str:
-        return "SIGNED GRACIE ABRAMS ITEMS ARE AVAILABLE! ✨\n"
+        return "SIGNED OLIVIA RODRIGO ITEMS ARE IN STOCK! 🦋\n"
 
 
 def run_checker(quiet: bool = False):
-    checker = GracieAbramsChecker(quiet=quiet)
+    checker = OliviaRodrigoChecker(quiet=quiet)
     checker.run()
 
 

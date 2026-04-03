@@ -25,11 +25,12 @@ CHECKERS = {
     'gracie': ('sites.gracie_abrams', 'GracieAbramsChecker'),
     'rolemodel': ('sites.role_model', 'RoleModelChecker'),
     'taylor': ('sites.taylor_swift', 'TaylorSwiftChecker'),
+    'olivia': ('sites.olivia_rodrigo', 'OliviaRodrigoChecker'),
     # Add more sites here as you create them:
 }
 
 # Sites to run by default (when no specific site is specified)
-DEFAULT_SITES = ['jonas', 'noah', 'noah-store', 'benson', 'gracie', 'rolemodel', 'taylor']
+DEFAULT_SITES = ['jonas', 'noah', 'noah-store', 'benson', 'gracie', 'rolemodel', 'taylor', 'olivia']
 
 
 

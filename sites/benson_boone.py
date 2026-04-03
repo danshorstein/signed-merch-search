@@ -2,13 +2,11 @@
 Benson Boone Store product checker.
 Monitors signed items at store.bensonboone.com
 
-Reuses the regex-based detection approach from the original benson.py script,
-wrapped in the ProductChecker framework for consistent email handling and
-seen-product tracking.
+Regex-based detection finds product URLs, then checks each product page
+for sold-out status. Uses requests first, Playwright fallback.
 """
 import re
-
-import requests
+import time
 
 from .base import ProductChecker
 
@@ -19,8 +17,10 @@ class BensonBooneChecker(ProductChecker):
 
     Uses regex to find product URLs containing the search term on the
     search results page, then visits each product page individually
-    to check stock status — same approach as the original benson.py.
+    to check stock status.
     """
+
+    use_playwright = True  # enable Playwright fallback
 
     @property
     def site_name(self) -> str:
@@ -36,19 +36,15 @@ class BensonBooneChecker(ProductChecker):
 
     def fetch_products(self) -> list:
         """
-        Override the default BeautifulSoup-based fetch with the regex approach
-        from benson.py. Finds product URLs via regex, then checks each product
-        page for sold-out status.
+        Fetch search page, find product URLs via regex, then check each
+        product page for sold-out status. Uses fetch_url() which tries
+        requests first and falls back to Playwright if blocked.
         """
         search_term = 'signed'
 
-        try:
-            r = requests.get(self.search_url, headers=self.HEADERS, timeout=15)
-            if r.status_code != 200:
-                self.log(f"ERROR: Status code {r.status_code}")
-                return []
-        except Exception as e:
-            self.log(f"ERROR fetching search page: {e}")
+        # Fetch search page (requests first, Playwright fallback)
+        search_html = self.fetch_url(self.search_url)
+        if not search_html:
             return []
 
         # Regex to find product URLs containing the search term
@@ -57,7 +53,7 @@ class BensonBooneChecker(ProductChecker):
             flags=re.IGNORECASE
         )
 
-        matches = list(set(url_re.findall(r.text)))
+        matches = list(set(url_re.findall(search_html)))
         items = [
             self.base_url + m if not m.startswith('http') else m
             for m in matches
@@ -67,45 +63,42 @@ class BensonBooneChecker(ProductChecker):
         products = []
 
         for item_url in items:
-            try:
-                r_item = requests.get(item_url, headers=self.HEADERS, timeout=15)
-                if r_item.status_code != 200:
-                    continue
+            time.sleep(2)  # polite delay between product pages
 
-                html = r_item.text
-
-                # Sold-out detection (from benson.py)
-                is_sold_out = (
-                    '<strong>Sorry Sold out</strong>' in html or
-                    'aria-disabled="true"' in html or
-                    'sold-out' in html.lower() or
-                    'sold_out' in html.lower()
-                )
-                sold_out_count = html.lower().count('sold out')
-
-                if not is_sold_out and sold_out_count < 6:
-                    # Extract a clean title from the page <title> tag
-                    title = "Signed Item"
-                    title_match = re.search(r'<title>(.*?)</title>', html)
-                    if title_match:
-                        title = title_match.group(1).split('–')[0].split('|')[0].strip()
-
-                    products.append({
-                        'title': title,
-                        'price': 'See listing',
-                        'url': item_url.split('?')[0],
-                        'image_url': '',
-                    })
-                    self.log(f"Found in-stock: {title}")
-
-            except Exception as e:
-                self.log(f"Error checking {item_url}: {e}")
+            html = self.fetch_url(item_url)
+            if not html:
                 continue
+
+            # Sold-out detection
+            is_sold_out = (
+                '<strong>Sorry Sold out</strong>' in html or
+                'aria-disabled="true"' in html or
+                'sold-out' in html.lower() or
+                'sold_out' in html.lower()
+            )
+            sold_out_count = html.lower().count('sold out')
+
+            # Extract title
+            title = "Signed Item"
+            title_match = re.search(r'<title>(.*?)</title>', html)
+            if title_match:
+                title = title_match.group(1).split('–')[0].split('|')[0].strip()
+
+            if not is_sold_out and sold_out_count < 6:
+                products.append({
+                    'title': title,
+                    'price': 'See listing',
+                    'url': item_url.split('?')[0],
+                    'image_url': '',
+                })
+                self.log(f"Found in-stock: {title}")
+            else:
+                self.log(f"Sold out: {title}")
 
         return products
 
     def parse_products(self, soup) -> list:
-        """Not used — fetch_products is overridden with regex logic."""
+        """Not used — fetch_products is overridden."""
         return []
 
     def get_email_subject(self, new_products: list, timestamp: str) -> str:
@@ -115,9 +108,7 @@ class BensonBooneChecker(ProductChecker):
         return "SIGNED BENSON BOONE ITEMS ARE AVAILABLE! 🎤\n"
 
 
-# Convenience function for direct execution
 def run_checker(quiet: bool = False):
-    """Run the Benson Boone checker."""
     checker = BensonBooneChecker(quiet=quiet)
     checker.run()
 

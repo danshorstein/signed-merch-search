@@ -2,11 +2,11 @@
 Role Model Store product checker.
 Monitors signed items at shop.heyrolemodel.com
 
-Uses regex-based detection, same approach as the Benson Boone checker.
+Regex-based detection finds product URLs, then checks each product page
+for sold-out status. Uses requests first, Playwright fallback.
 """
 import re
-
-import requests
+import time
 
 from .base import ProductChecker
 
@@ -20,6 +20,8 @@ class RoleModelChecker(ProductChecker):
     Note: Excludes /products/rx-signed-cd which is a known
     non-relevant result.
     """
+
+    use_playwright = True
 
     EXCLUDE_URLS = [
         'https://shop.heyrolemodel.com/products/rx-signed-cd',
@@ -38,19 +40,10 @@ class RoleModelChecker(ProductChecker):
         return "https://shop.heyrolemodel.com"
 
     def fetch_products(self) -> list:
-        """
-        Regex-based product detection: find product URLs containing 'signed',
-        then check each product page for sold-out status.
-        """
         search_term = 'signed'
 
-        try:
-            r = requests.get(self.search_url, headers=self.HEADERS, timeout=15)
-            if r.status_code != 200:
-                self.log(f"ERROR: Status code {r.status_code}")
-                return []
-        except Exception as e:
-            self.log(f"ERROR fetching search page: {e}")
+        search_html = self.fetch_url(self.search_url)
+        if not search_html:
             return []
 
         url_re = re.compile(
@@ -58,7 +51,7 @@ class RoleModelChecker(ProductChecker):
             flags=re.IGNORECASE
         )
 
-        matches = list(set(url_re.findall(r.text)))
+        matches = list(set(url_re.findall(search_html)))
         items = [
             self.base_url + m if not m.startswith('http') else m
             for m in matches
@@ -68,49 +61,44 @@ class RoleModelChecker(ProductChecker):
         products = []
 
         for item_url in items:
-            # Check exclusion list
             clean_url = item_url.split('?')[0]
             if clean_url in self.EXCLUDE_URLS or item_url in self.EXCLUDE_URLS:
                 self.log(f"Skipping excluded: {clean_url}")
                 continue
 
-            try:
-                r_item = requests.get(item_url, headers=self.HEADERS, timeout=15)
-                if r_item.status_code != 200:
-                    continue
+            time.sleep(2)
 
-                html = r_item.text
-
-                is_sold_out = (
-                    '<strong>Sorry Sold out</strong>' in html or
-                    'aria-disabled="true"' in html or
-                    'sold-out' in html.lower() or
-                    'sold_out' in html.lower()
-                )
-                sold_out_count = html.lower().count('sold out')
-
-                if not is_sold_out and sold_out_count < 6:
-                    title = "Signed Item"
-                    title_match = re.search(r'<title>(.*?)</title>', html)
-                    if title_match:
-                        title = title_match.group(1).split('–')[0].split('|')[0].strip()
-
-                    products.append({
-                        'title': title,
-                        'price': 'See listing',
-                        'url': clean_url,
-                        'image_url': '',
-                    })
-                    self.log(f"Found in-stock: {title}")
-
-            except Exception as e:
-                self.log(f"Error checking {item_url}: {e}")
+            html = self.fetch_url(item_url)
+            if not html:
                 continue
+
+            is_sold_out = (
+                '<strong>Sorry Sold out</strong>' in html or
+                'aria-disabled="true"' in html or
+                'sold-out' in html.lower() or
+                'sold_out' in html.lower()
+            )
+            sold_out_count = html.lower().count('sold out')
+
+            title = "Signed Item"
+            title_match = re.search(r'<title>(.*?)</title>', html)
+            if title_match:
+                title = title_match.group(1).split('–')[0].split('|')[0].strip()
+
+            if not is_sold_out and sold_out_count < 6:
+                products.append({
+                    'title': title,
+                    'price': 'See listing',
+                    'url': clean_url,
+                    'image_url': '',
+                })
+                self.log(f"Found in-stock: {title}")
+            else:
+                self.log(f"Sold out: {title}")
 
         return products
 
     def parse_products(self, soup) -> list:
-        """Not used — fetch_products is overridden with regex logic."""
         return []
 
     def get_email_subject(self, new_products: list, timestamp: str) -> str:
@@ -121,7 +109,6 @@ class RoleModelChecker(ProductChecker):
 
 
 def run_checker(quiet: bool = False):
-    """Run the Role Model checker."""
     checker = RoleModelChecker(quiet=quiet)
     checker.run()
 
