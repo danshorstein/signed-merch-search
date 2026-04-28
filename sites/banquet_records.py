@@ -24,6 +24,8 @@ class BanquetRecordsChecker(ProductChecker):
     This is necessary because the search page doesn't show variant availability.
     """
     
+    use_playwright = True
+    
     def __init__(self, artist: str = None, quiet: bool = False):
         """
         Initialize the Banquet Records checker.
@@ -156,12 +158,12 @@ class BanquetRecordsChecker(ProductChecker):
             cache_buster = f"?t={int(time.time())}" if "?" not in url else f"&t={int(time.time())}"
             url_with_timestamp = f"{url}{cache_buster}"
             
-            r = requests.get(url_with_timestamp, headers=self.HEADERS, timeout=15)
+            html = self.fetch_url(url_with_timestamp)
             
-            if r.status_code != 200:
+            if not html:
                 return signed_variants
             
-            soup = BeautifulSoup(r.text, 'html.parser')
+            soup = BeautifulSoup(html, 'html.parser')
             
             # Find all variant rows
             variant_rows = soup.find_all('div', class_='row')
