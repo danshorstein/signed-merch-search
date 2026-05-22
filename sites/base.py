@@ -15,6 +15,9 @@ from datetime import datetime, timedelta
 import smtplib
 from abc import ABC, abstractmethod
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from pathlib import Path
 
 import requests
@@ -31,6 +34,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 LOGS_DIR = DATA_DIR / "logs"
 SEEN_DIR = DATA_DIR / "seen"
+SCREENSHOTS_DIR = DATA_DIR / "screenshots"
 
 
 # How many days of logs to keep
@@ -85,12 +89,20 @@ class ProductChecker(ABC):
         # Email config from environment
         self.email_sender = os.getenv('EMAIL_SENDER')
         self.email_password = os.getenv('EMAIL_PASSWORD')
-        self.email_recipients = os.getenv('EMAIL_RECIPIENTS', '').split(',')
+        self.email_recipients = self._parse_recipients(os.getenv('EMAIL_RECIPIENTS', ''))
+        error_recipients = self._parse_recipients(os.getenv('ERROR_EMAIL_RECIPIENTS', ''))
+        self.error_email_recipients = error_recipients or self.email_recipients
+        self.last_fetch_had_results = False
+
+    @staticmethod
+    def _parse_recipients(value: str) -> list[str]:
+        return [recipient.strip() for recipient in value.split(',') if recipient.strip()]
 
     def _ensure_directories(self):
         """Ensure data directories exist."""
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         SEEN_DIR.mkdir(parents=True, exist_ok=True)
+        SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
     def _rotate_logs(self):
         """Remove log entries older than LOG_RETENTION_DAYS."""
@@ -211,6 +223,21 @@ class ProductChecker(ABC):
             self._page = None
             self._playwright = None
 
+    def capture_screenshot(self, label: str = "failure") -> Path | None:
+        """Save a screenshot of the current browser page when available."""
+        if self._page is None:
+            return None
+
+        try:
+            timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            path = SCREENSHOTS_DIR / f"{self._safe_name}_{label}_{timestamp}.png"
+            self._page.screenshot(path=str(path), full_page=True)
+            self.log(f"Saved screenshot: {path}")
+            return path
+        except Exception as e:
+            self.log(f"ERROR saving screenshot: {e}")
+            return None
+
     def get_page_html(self, url: str, wait_ms: int = 1500) -> str | None:
         """
         Fetch a page's HTML using the Playwright browser.
@@ -298,6 +325,29 @@ class ProductChecker(ABC):
         with open(self._failure_file, 'w') as f:
             json.dump(data, f, indent=2)
 
+    def _recent_log_lines(self, limit: int = 40) -> list[str]:
+        if not self.log_file.exists():
+            return []
+
+        try:
+            with open(self.log_file, "r") as f:
+                return f.readlines()[-limit:]
+        except Exception as e:
+            return [f"Could not read log file: {e}\n"]
+
+    def _capture_failure_screenshot(self) -> Path | None:
+        screenshot = self.capture_screenshot("failure")
+        if screenshot or not self.use_playwright:
+            return screenshot
+
+        try:
+            self._start_browser()
+            self.get_page_html(self.search_url, wait_ms=2500)
+            return self.capture_screenshot("failure")
+        except Exception as e:
+            self.log(f"ERROR capturing failure screenshot: {e}")
+            return None
+
     def _record_failure(self, error_msg: str):
         """Record a fetch failure. Alert after FAILURE_ALERT_THRESHOLD consecutive failures."""
         failures = self._load_failures()
@@ -306,6 +356,8 @@ class ProductChecker(ABC):
         failures["last_failure"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
         if failures["count"] >= FAILURE_ALERT_THRESHOLD and not failures.get("alerted", False):
+            screenshot_path = self._capture_failure_screenshot()
+            recent_logs = "".join(self._recent_log_lines())
             subject = f"⚠️ {self.site_name} checker failing! - {failures['count']} consecutive failures"
             body = (
                 f"The {self.site_name} product checker has failed {failures['count']} "
@@ -313,9 +365,16 @@ class ProductChecker(ABC):
                 f"Last error: {error_msg}\n"
                 f"Search URL: {self.search_url}\n\n"
                 f"This may indicate the site has changed its bot protection or structure.\n"
-                f"You will not be alerted again until the checker recovers and fails again."
+                f"You will not be alerted again until the checker recovers and fails again.\n\n"
+                f"Recent log lines:\n"
+                f"{recent_logs or 'No log lines available.'}"
             )
-            self.send_email(subject, body)
+            self.send_email(
+                subject,
+                body,
+                recipients=self.error_email_recipients,
+                attachments=[screenshot_path] if screenshot_path else None,
+            )
             failures["alerted"] = True
             self.log(f"FAILURE ALERT sent ({failures['count']} consecutive failures)")
 
@@ -367,17 +426,40 @@ class ProductChecker(ABC):
         soup = BeautifulSoup(html, 'html.parser')
         return self.parse_products(soup)
 
-    def send_email(self, subject: str, body: str) -> bool:
+    def send_email(
+        self,
+        subject: str,
+        body: str,
+        recipients: list[str] | None = None,
+        attachments: list[Path | None] | None = None,
+    ) -> bool:
         try:
-            msg = MIMEText(body)
+            recipients = recipients or self.email_recipients
+            if attachments:
+                msg = MIMEMultipart()
+                msg.attach(MIMEText(body))
+                for attachment in attachments:
+                    if not attachment or not attachment.exists():
+                        continue
+                    part = MIMEBase("application", "octet-stream")
+                    with open(attachment, "rb") as f:
+                        part.set_payload(f.read())
+                    encoders.encode_base64(part)
+                    part.add_header(
+                        "Content-Disposition",
+                        f"attachment; filename={attachment.name}",
+                    )
+                    msg.attach(part)
+            else:
+                msg = MIMEText(body)
             msg['Subject'] = subject
             msg['From'] = self.email_sender
-            msg['To'] = ', '.join(self.email_recipients)
+            msg['To'] = ', '.join(recipients)
 
             self.log("Connecting to SMTP server...")
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp_server:
                 smtp_server.login(self.email_sender, self.email_password)
-                smtp_server.sendmail(self.email_sender, self.email_recipients, msg.as_string())
+                smtp_server.sendmail(self.email_sender, recipients, msg.as_string())
                 self.log("Email sent successfully!")
             return True
         except Exception as e:
@@ -412,8 +494,12 @@ class ProductChecker(ABC):
             products = self.fetch_products()
 
             if not products:
-                self.log("No products found or fetch failed")
-                self._record_failure(f"No products returned from {self.search_url}")
+                if self.last_fetch_had_results:
+                    self.log("OK - found matching products, none currently in stock")
+                    self._record_success()
+                else:
+                    self.log("No products found or fetch failed")
+                    self._record_failure(f"No products returned from {self.search_url}")
                 return
 
             # Successful fetch

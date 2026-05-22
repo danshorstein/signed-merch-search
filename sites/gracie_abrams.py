@@ -50,6 +50,7 @@ class GracieAbramsChecker(ProductChecker):
             for m in matches
         ]
 
+        self.last_fetch_had_results = True
         self.log(f"Found {len(items)} product URLs to check")
         products = []
 
@@ -58,6 +59,10 @@ class GracieAbramsChecker(ProductChecker):
 
             html = self.fetch_url(item_url)
             if not html:
+                continue
+
+            if '404 not found' in html.lower() or 'page not found' in html.lower():
+                self.log(f"404 Not Found: {item_url}")
                 continue
 
             is_sold_out = (

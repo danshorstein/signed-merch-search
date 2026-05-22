@@ -65,6 +65,10 @@ class OliviaRodrigoChecker(ProductChecker):
             if not html:
                 continue
 
+            if '404 not found' in html.lower() or 'page not found' in html.lower():
+                self.log(f"404 Not Found: {item_url}")
+                continue
+
             is_sold_out = (
                 '<strong>Sorry Sold out</strong>' in html or
                 'aria-disabled="true"' in html or
